@@ -1,0 +1,378 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <assert.h>
+#include "mpi.h" 
+
+#define ASSERT(condition) { if(!(condition)){ fprintf(stderr, "ASSERT FAILED: %d, (file: %s), (line: %d) \n", #condition, __FILE__ , __LINE__); } }
+
+#define NSPEEDS 9
+#define speed(j, x, y, w, h) ((j * w * h) + (h * x) + y )
+
+#ifndef MPI_RANK
+#error MPI Rank not given!
+#endif
+
+/*!pympi "float final_cells[{}];\n".format(p.w * p.h * 9) if r.rank == 0 else "" */
+float cells[/*!pympi r.w * r.h * 9 */];
+float acells[/*!pympi r.w * r.h * 9 */];
+/*!pympi "char obstacles[{}] = {{{}}};".format(len(p.obstacles), ", ".join(map(lambda x: ("\n" if x[1] % x[0].w == 0 else "") + str(x[2]), [(p,) + g for g in enumerate(p.obstacles)]))) if r.rank == 0 else "" */
+/*!pympi "char p_obstacles[{}] = {{{}}};".format(r.w * r.h, ", ".join(map(lambda x: ("\n" if x[1] % x[0].w == 0 else "") + str(x[2]), [(r,) + g for g in enumerate([p.obstacles[(y % p.h)*p.w + (x % p.w)] for y in range(r.y, r.y + r.h) for x in range(r.x, r.x + r.w)])]))) */
+
+/*!pympi "float av_vels[{ni}];\n float final_av_vels[{ni}] = {{{}}};".format(", ".join("0" for _ in xrange(p.num_iters)), ni=p.num_iters) */
+
+
+const int rx = /*!pympi r.x */;
+const int ry = /*!pympi r.y */;
+const int rw = /*!pympi r.w */;
+const int rh = /*!pympi r.h */;
+const float omega = /*!pympi p.omega */;
+
+const int size = /*!pympi r.w * r.h */;
+
+
+
+/*/*!pympi """!*/
+MPI_Request reqs[{total}];
+void  send_halos(float* src){{
+  
+  /*""".format(total = 2 * (len(r.left_halos) + len(r.right_halos))) *///*/
+  
+  /*/*!pympi "\n".join(["""!*/
+  //Right halo even rank
+  MPI_Irecv(&src[speed({recv[drn]}, ({recv[x]}), ({recv[y]}), rw, rh)], {recv[cnt]}, MPI_FLOAT, {send[rank]}, 0, MPI_COMM_WORLD, &(reqs[{i}*2]));
+  MPI_Isend(&src[speed({send[drn]}, ({send[x]}), ({send[y]}), rw, rh)], {send[cnt]}, MPI_FLOAT, {send[rank]}, 0, MPI_COMM_WORLD, &(reqs[{i}*2 + 1]));
+  /* """.format(send=com[0], recv=com[1], r=r, i=i) for i,com in enumerate(itertools.chain(*([r.right_halos, r.left_halos] if r.rank % 2 else [r.left_halos, r.right_halos])))])  *///*/
+}
+
+float prc(float* dest, float* src, int jj, int ii){
+  int x_e,x_w,y_n,y_s;
+  x_e = (jj + 1);
+  y_n = (ii + 1);
+  y_s = (ii - 1);
+  x_w = (jj - 1);
+  int id = ii * rw + jj;
+  float tot_u2 = 0;
+  if (!p_obstacles[id]) {
+    float nc[9];
+    float u_s, u_d, d_eq, ld, ld1, ld2, u_x, u_y, u_sq;
+    nc[0] = src[speed(0,jj, ii, rw, rh)]; /* central cell, */
+    nc[1] = src[speed(1,x_w,  ii, rw, rh)];
+    nc[2] = src[speed(2, jj, y_s, rw, rh)];
+    nc[3] = src[speed(3,x_e,  ii, rw, rh)];
+    nc[4] = src[speed(4, jj, y_n, rw, rh)];
+    nc[5] = src[speed(5,x_w, y_s, rw, rh)];
+    nc[6] = src[speed(6,x_e, y_s, rw, rh)];
+    nc[7] = src[speed(7,x_e, y_n, rw, rh)];
+    nc[8] = src[speed(8,x_w, y_n ,rw, rh)];
+    ld = 0;
+    int kk;
+    for(kk = 0; kk < NSPEEDS; kk++) ld += nc[kk]; 
+    ld1 = ld*omega/9.0f;
+    ld2 = ld*omega/36.0f;
+    u_x = (nc[1] + nc[5] + nc[8] - (nc[3] +
+            nc[6] + nc[7])) / ld;
+    u_y = (nc[2] + nc[5] + nc[6] - (nc[4] + 
+          nc[7] + nc[8])) / ld;
+    u_sq = u_x * u_x + u_y * u_y;
+    u_s = u_x + u_y;
+    u_d = -u_x + u_y;
+    d_eq = 1.0f - 1.5f*u_sq;
+    dest[speed(0,jj, ii, rw, rh)] = d_eq*ld*omega*(4.0f/9.0f)               + (1 - omega)*nc[0];
+    dest[speed(1,jj, ii, rw, rh)] = ld1*(d_eq + 4.5f*u_x*(2.0f/3.0f + u_x)) + (1 - omega)*nc[1];
+    dest[speed(3,jj, ii, rw, rh)] = ld1*(d_eq - 4.5f*u_x*(2.0f/3.0f - u_x)) + (1 - omega)*nc[3];
+    dest[speed(2,jj, ii, rw, rh)] = ld1*(d_eq + 4.5f*u_y*(2.0f/3.0f + u_y)) + (1 - omega)*nc[2];
+    dest[speed(4,jj, ii, rw, rh)] = ld1*(d_eq - 4.5f*u_y*(2.0f/3.0f - u_y)) + (1 - omega)*nc[4];
+    dest[speed(5,jj, ii, rw, rh)] = ld2*(d_eq + 4.5f*u_s*(2.0f/3.0f + u_s)) + (1 - omega)*nc[5];
+    dest[speed(7,jj, ii, rw, rh)] = ld2*(d_eq - 4.5f*u_s*(2.0f/3.0f - u_s)) + (1 - omega)*nc[7];
+    dest[speed(6,jj, ii, rw, rh)] = ld2*(d_eq + 4.5f*u_d*(2.0f/3.0f + u_d)) + (1 - omega)*nc[6];
+    dest[speed(8,jj, ii, rw, rh)] = ld2*(d_eq - 4.5f*u_d*(2.0f/3.0f - u_d)) + (1 - omega)*nc[8];   
+    return sqrt(u_sq);
+  } else {
+    dest[speed(0,jj, ii, rw, rh)] = src[speed(0,jj, ii, rw, rh)]; /* central cell, */
+    dest[speed(1,jj, ii, rw, rh)] = src[speed(3,x_e,  ii, rw ,rh)]; /* east */
+    dest[speed(2,jj, ii, rw, rh)] = src[speed(4, jj, y_n, rw, rh)]; /* north */
+    dest[speed(3,jj, ii, rw, rh)] = src[speed(1,x_w,  ii, rw ,rh)]; /* west */
+    dest[speed(4,jj, ii, rw, rh)] = src[speed(2, jj, y_s, rw ,rh)]; /* south */
+    dest[speed(5,jj, ii, rw, rh)] = src[speed(7,x_e, y_n, rw, rh)]; /* north-east */
+    dest[speed(6,jj, ii, rw, rh)] = src[speed(8,x_w, y_n, rw, rh)]; /* north-west */
+    dest[speed(7,jj, ii, rw, rh)] = src[speed(5,x_w, y_s, rw, rh)]; /* south-west */
+    dest[speed(8,jj, ii, rw, rh)] = src[speed(6,x_e, y_s, rw, rh)]; /* south-east */
+  }
+  return 0;
+}
+float timestep(float* dest, float* src){
+  /*/*!pympi "\n".join(["""!*/
+    src[speed(2,{x}, {y}, {w}, {h})] += {w1};
+    src[speed(5,{x}, {y}, {w}, {h})] += {w2};
+    src[speed(6,{x}, {y}, {w}, {h})] += {w2};
+    src[speed(4,{x}, {y}, {w}, {h})] -= {w1};
+    src[speed(7,{x}, {y}, {w}, {h})] -= {w2};
+    src[speed(8,{x}, {y}, {w}, {h})] -= {w2};
+  /*""".format(w1=p.accel*p.fluid_density/9, w2=p.accel*p.fluid_density/36, x=(p.idx - r.x), y=(y - r.y), w=r.w, h=r.h, p=p) for y in range(r.y, r.y + r.h) if p.obstacles[(y % p.h) * p.w + p.idx] == 0 and r.x <= p.idx < r.x + r.w]) if p.dim == "column" else "\n".join(["""!*/
+    src[speed(1,{x}, {y}, {w}, {h})] += {w1};
+    src[speed(5,{x}, {y}, {w}, {h})] += {w2};
+    src[speed(8,{x}, {y}, {w}, {h})] += {w2};
+    src[speed(3,{x}, {y}, {w}, {h})] -= {w1};
+    src[speed(6,{x}, {y}, {w}, {h})] -= {w2};
+    src[speed(7,{x}, {y}, {w}, {h})] -= {w2};
+  /*""".format(w1=p.accel*p.fluid_density/9, w2=p.accel*p.fluid_density/36, x=(x - r.x), y=(p.idx - r.y), w=r.w, h=r.h, p=p) for x in range(r.x, r.x + r.w) if p.obstacles[p.idx * p.w + (x % p.w)] == 0 ]) *///*/
+ 
+  float tot_u = 0.0f;
+  /*/*!pympi "\n".join(["""!*/
+    tot_u += prc(dest, src, {jj}, {ii}); 
+  /*""".format(jj=jj, ii=ii) for jj,ii in set(itertools.chain(*[
+    [(a, 1)       for a in xrange(1, r.w - 1)],
+    [(a, r.h - 2) for a in xrange(1, r.w - 1)],
+    [(1, a)       for a in xrange(1, r.h - 1)],
+    [(r.w - 2, a) for a in xrange(1, r.h - 1)],
+]))]) *///*/
+  send_halos(dest);
+  int ii, jj;
+  int lastii = 0;
+  for(ii = 2; ii < rh - 2; ii += 1) {
+    #pragma simd reduction(+:tot_u) 
+    for(jj = 2; jj < rw - 2; jj += 1) {
+     tot_u += prc(dest, src, jj, ii); 
+    }
+  }
+  MPI_Waitall(/*!pympi 2 * (len(r.right_halos) + len(r.left_halos)) */, reqs, MPI_STATUS_IGNORE);
+  return tot_u;
+}
+
+void initialise(float* src){
+  int x = 0;
+  int y = 0;
+  for(x = 0; x < rw; x++){
+    for(y = 0; y < rh; y++){
+      int j;
+      /* centre */
+      src[speed(0, x, y, rw, rh)] = /*!pympi p.w0  */;
+      for(j = 1; j < 5; j++) src[speed(j, x, y, rw, rh)] = /*!pympi p.w1 */;
+      for(j = 5; j < 9; j++) src[speed(j, x, y, rw, rh)] = /*!pympi p.w2 */;
+    }
+  }
+  for(x = 0; x < /*!pympi p.num_iters */; x++) av_vels[x] = 0.0f;
+}
+
+/*/*!pympi """!*/
+
+
+double av_velocity(float* cells, char* obstacles){{
+  int    ii,jj,kk;       
+  int    tot_cells = 0;  
+  double tot_u;          
+
+  double local_density;  
+  double u_x;            
+  double u_y;            
+
+  tot_u = 0.0;
+  for (ii = 0; ii < {p.h}; ii++) {{
+    for (jj = 0; jj < {p.w}; jj++) {{
+      if (!obstacles[ii*{p.w} + jj]) {{
+        local_density = 0.0;
+
+        for (kk = 0; kk < NSPEEDS; kk++) {{
+          local_density += cells[speed(kk, jj, ii, {p.w}, {p.h})];
+        }}
+
+        u_x = (cells[speed(1, jj, ii, {p.w}, {p.h})] + 
+            cells[speed(5, jj, ii, {p.w}, {p.h})] + 
+            cells[speed(8, jj, ii, {p.w}, {p.h})]
+          - (cells[speed(3, jj, ii, {p.w}, {p.h})] +
+            cells[speed(6, jj, ii, {p.w}, {p.h})] +
+            cells[speed(7, jj, ii, {p.w}, {p.h})])) /
+          local_density;
+
+        u_y = (cells[speed(2, jj, ii, {p.w}, {p.h})] + 
+            cells[speed(5, jj, ii, {p.w}, {p.h})] +
+            cells[speed(6, jj, ii, {p.w}, {p.h})]
+          - (cells[speed(4, jj, ii, {p.w}, {p.h})] +
+            cells[speed(7, jj, ii, {p.w}, {p.h})] +
+            cells[speed(8, jj, ii, {p.w}, {p.h})])) /
+          local_density;
+
+        tot_u += sqrt(u_x*u_x + u_y*u_y);
+        ++tot_cells;
+      }}
+    }}
+  }}
+  return tot_u / {p.tot_cells};
+}}
+
+void write_values(float* cells, char* obstacles, float* av_vels){{
+  FILE* fp;                     
+  int ii,jj,kk;                 
+  const double c_sq = 1.0/3.0;  
+  double local_density;         
+  double pressure;                
+  double u_x;                    
+  double u_y;                    
+  double u;                      
+
+  fp = fopen("final_state.dat", "w");
+
+  if (fp == NULL)
+  {{
+    //DIE("could not open file output file");
+  }}
+
+  for (ii = 0; ii < {p.h}; ii++){{
+    for (jj = 0; jj < {p.w}; jj++){{
+      if (obstacles[ii*{p.w} + jj]){{
+        u_x = u_y = u = 0.0;
+        pressure = {p.fluid_density} * c_sq;
+      }}else{{
+        local_density = 0.0;
+        for (kk = 0; kk < NSPEEDS; kk++){{
+          local_density += cells[speed(kk, jj, ii, {p.w}, {p.h})];
+        }}
+
+        u_x = (cells[speed(1, jj, ii, {p.w}, {p.h})] +
+            cells[speed(5, jj, ii, {p.w}, {p.h})] +
+            cells[speed(8, jj, ii, {p.w}, {p.h})]
+          - (cells[speed(3, jj, ii, {p.w}, {p.h})] +
+            cells[speed(7, jj, ii, {p.w}, {p.h})] +
+            cells[speed(6, jj, ii, {p.w}, {p.h})]))
+          / local_density;
+
+        u_y = (cells[speed(2, jj, ii, {p.w}, {p.h})] +
+            cells[speed(5, jj, ii, {p.w}, {p.h})] +
+            cells[speed(6, jj, ii, {p.w}, {p.h})]
+          - (cells[speed(4, jj, ii, {p.w}, {p.h})] +
+            cells[speed(7, jj, ii, {p.w}, {p.h})] +
+            cells[speed(8, jj, ii, {p.w}, {p.h})]))
+          / local_density;
+
+        u = sqrt((u_x * u_x) + (u_y * u_y));
+        pressure = local_density * c_sq;
+      }}
+      fprintf(fp,"%d %d %.12E %.12E %.12E %.12E %d\\\\n",
+        jj,ii,u_x,u_y,u,pressure,obstacles[ii*{p.w} + jj]);
+    }}
+  }}
+
+  fclose(fp);
+  fp = fopen("av_vels.dat", "w");
+  if (fp == NULL)
+  {{
+    //DIE("could not open file output file");
+  }}
+
+  for (ii = 0; ii < {p.num_iters}; ii++)
+  {{
+    fprintf(fp,"%d:\\\\t%.12E\\\\n", ii, av_vels[ii] / {p.tot_cells});
+  }}
+
+  fclose(fp);
+}}
+
+double calc_reynolds(float* cells, char* obstacles) {{
+  const double viscosity = 1.0 / 6.0 * (2.0 / {p.omega} - 1.0);
+  return av_velocity(cells,obstacles) * {p.reynolds_dim} / viscosity;
+}}
+
+
+void finalise(float* dest){{
+  int x = 0;
+  int y = 0;
+  for(x = 0; x < {pw}; x++){{
+    for(y = 0; y < {ph}; y++){{
+      int j;
+      final_cells[speed(0, x, y, {pw}, {ph})] = {w0};
+      for(j = 1; j < 5; j++) final_cells[speed(j, x, y, {pw}, {ph})] = {w1};
+      for(j = 5; j < 9; j++) final_cells[speed(j, x, y, {pw}, {ph})] = {w2};
+    }}
+  }}
+
+  float buf[{maxsize}];
+  {forloop}
+
+
+  /* We're all syncronized now... !*/
+}}
+/*""".format(maxsize = 9 * max([rr.w * rr.h for rr in p.regions]), p=p, pw = p.w, ph = p.h, w0 = p.w0, w1 = p.w1, w2 = p.w2, forloop="/*" + "".join(["""!*/
+  {com}MPI_Recv(buf, {rr.w: >3} * {rr.h: >3} * 9, MPI_FLOAT, {rr.rank}, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+  /*/memcpy(buf, dest, {rr.w} * {rr.h} * 9 * sizeof(float));/**/
+  for(x = {rr.x} + 1; x < {rr.x} + {rr.w} - 1; x++){{
+    for(y = {rr.y} + 1; y < {rr.y} + {rr.h} - 1; y++){{
+      int k = 0;
+      for(; k < 9; k++) final_cells[speed(k, x, y, {p.w}, {p.h})] = buf[speed(k, (x - {rr.x}), (y - {rr.y}), {rr.w}, {rr.h})];  
+    }}
+  }}
+  /*""".format(rr=rr, p=p, com="/*" if rr.rank is r.rank else "") for rr in p.regions]) + "*" + "/") if r.rank == 0 else "" *///*/
+
+void sum_vels(float* dest, float* src){
+  int i ;
+  for(i = 0; i < /*!pympi p.num_iters */; i++){
+    dest[i] += src[i];
+  }
+}
+int main(int argc, char* argv[])
+{ 
+  int rank;
+  int size;
+  int i = 0;
+  MPI_Init(&argc,&argv);
+  float* src = (float*)cells, *dest = (float*)acells;
+  initialise(src);
+  initialise(dest);
+
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank); 
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  assert(rank==MPI_RANK);
+
+  /*!pympi
+  """
+  struct timeval timstr;        // structure to hold elapsed time 
+  struct rusage ru;             // structure to hold CPU time--system and user 
+  double tic,toc;               // floating point numbers to calculate elapsed wallclock time 
+  double usrtim;                // floating point number to record elapsed user CPU time 
+  double systim;                // floating point number to record elapsed system CPU time 
+  gettimeofday(&timstr,NULL);
+  tic=timstr.tv_sec+(timstr.tv_usec/1000000.0);
+  """ if r.rank == 0 else ""
+  */
+  for(i = 0; i < /*!pympi p.num_iters */; i++){
+    float* tmp = dest;
+    dest = src;
+    src = tmp;
+    av_vels[i] = timestep(dest, src);
+  }
+  
+  
+  /*!pympi
+  r"""
+  gettimeofday(&timstr,NULL);
+  toc=timstr.tv_sec+(timstr.tv_usec/1000000.0);
+  getrusage(RUSAGE_SELF, &ru);
+  timstr=ru.ru_utime;
+  usrtim=timstr.tv_sec+(timstr.tv_usec/1000000.0);
+  timstr=ru.ru_stime;
+  systim=timstr.tv_sec+(timstr.tv_usec/1000000.0);
+    
+  
+  finalise(dest);
+  sum_vels(final_av_vels, av_vels);
+  for(i = 1; i < {p.num_ranks}; i++){{
+    MPI_Recv(av_vels, {p.num_iters}, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    sum_vels(final_av_vels, av_vels);
+  }}
+
+  write_values(final_cells, obstacles,final_av_vels);
+  printf("==done==\\n");
+  printf("Reynolds number:\\t\\t%.12E\\n", calc_reynolds(final_cells, obstacles));
+  printf("Elapsed time:\\t\\t\\t%.6f (s)\\n", toc-tic);
+  printf("Elapsed user CPU time:\\t\\t%.6f (s)\\n", usrtim);
+  printf("Elapsed system CPU time:\\t%.6f (s)\\n", systim);
+  
+  """.format(p=p) if r.rank == 0 else "MPI_Send(dest, rw * rh * 9, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);"
+  */
+  /*!pympi "MPI_Send(av_vels, {p.num_iters}, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);".format(p=p) if r.rank != 0 else "" */
+  MPI_Finalize();
+  return EXIT_SUCCESS;
+}

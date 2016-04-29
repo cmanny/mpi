@@ -1,0 +1,3 @@
+It's all a giant hack, run this command:
+
+(echo "" > status) && qsub mpi_submit -v LBM_PARAM=large_pipe.params && (tail -f status 2>/dev/null)

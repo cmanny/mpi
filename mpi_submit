@@ -1,0 +1,31 @@
+#!/bin/bash 
+
+#PBS -N VECTORIZE-ME
+#PBS -q teaching
+#PBS -l nodes=4:ppn=16,walltime=00:10:00
+#PBS -o OUT
+#! Mail to user if job aborts
+#PBS -m a
+
+#! application name
+cd $PBS_O_WORKDIR
+
+echo Running on host `hostname`
+echo Time is `date`
+echo Directory is `pwd`
+echo PBS job ID is $PBS_JOBID
+echo This jobs runs on the following machines:
+echo `cat $PBS_NODEFILE `
+echo $PBS_NODEFILE
+ 
+#! Create a machine file for MPI
+
+numnodes=`wc $PBS_NODEFILE | awk '{ print $1 }'`
+echo `cat $PBS_NODEFILE` > $PBS_JOBID
+module load openmpi/intel/64/1.6.5
+module load languages/intel-compiler-16
+
+echo "Lbm param: $LBM_PARAM"
+#LBM_PARAM=large_pipe.params
+#! Run the parallel MPI executable (nodes*ppn)
+python mpi_compile_run.py $LBM_PARAM mpi_process_template.pc $PBS_NODEFILE $numnodes false true 2>&1 1>status
